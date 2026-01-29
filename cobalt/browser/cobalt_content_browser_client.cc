@@ -33,6 +33,7 @@
 #include "cobalt/browser/cobalt_browser_main_parts.h"
 #include "cobalt/browser/cobalt_secure_navigation_throttle.h"
 #include "cobalt/browser/cobalt_web_contents_observer.h"
+#include "cobalt/browser/command_line_logger.h"
 #include "cobalt/browser/constants/cobalt_experiment_names.h"
 #include "cobalt/browser/features.h"
 #include "cobalt/browser/global_features.h"
@@ -40,10 +41,12 @@
 #include "cobalt/browser/user_agent/user_agent_platform_info.h"
 #include "cobalt/common/features/starboard_features_initialization.h"
 #include "cobalt/media/service/mojom/video_geometry_setter.mojom.h"
+#include "cobalt/media/service/platform_window_provider_service.h"
 #include "cobalt/media/service/video_geometry_setter_service.h"
 #include "cobalt/shell/browser/shell.h"
 #include "cobalt/shell/common/shell_paths.h"
 #include "cobalt/shell/common/shell_switches.h"
+#include "cobalt/shell/common/url_constants.h"
 #include "cobalt/version.h"
 #include "components/embedder_support/user_agent_utils.h"
 #include "components/metrics/metrics_state_manager.h"
@@ -90,6 +93,17 @@ constexpr base::FilePath::CharType kTransportSecurityPersisterFilename[] =
     FILE_PATH_LITERAL("TransportSecurity");
 constexpr base::FilePath::CharType kTrustTokenFilename[] =
     FILE_PATH_LITERAL("Trust Tokens");
+
+void BindPlatformWindowProviderService(
+    uint64_t window_handle,
+    mojo::PendingReceiver<cobalt::media::mojom::PlatformWindowProvider>
+        receiver) {
+  mojo::MakeSelfOwnedReceiver(
+      std::make_unique<cobalt::media::PlatformWindowProviderService>(
+          base::BindRepeating([](uint64_t handle) { return handle; },
+                              window_handle)),
+      std::move(receiver));
+}
 
 }  // namespace
 
@@ -151,9 +165,19 @@ CobaltContentBrowserClient::CobaltContentBrowserClient()
               nullptr,
               base::OnTaskRunnerDeleter(nullptr))) {
   DETACH_FROM_THREAD(thread_checker_);
+#if BUILDFLAG(IS_STARBOARD)
+  // TODO: b/476434249 - Revisit if Cobalt supports multiple tabs/windows.
+  ui::PlatformWindowStarboard::SetWindowCreatedCallback(
+      base::BindRepeating(&CobaltContentBrowserClient::OnSbWindowCreated,
+                          weak_factory_.GetWeakPtr()));
+#endif  // BUILDFLAG(IS_STARBOARD)
 }
 
-CobaltContentBrowserClient::~CobaltContentBrowserClient() = default;
+CobaltContentBrowserClient::~CobaltContentBrowserClient() {
+#if BUILDFLAG(IS_STARBOARD)
+  ui::PlatformWindowStarboard::SetWindowCreatedCallback(base::NullCallback());
+#endif  // BUILDFLAG(IS_STARBOARD)
+}
 
 // static
 CobaltContentBrowserClient* CobaltContentBrowserClient::Get() {
@@ -319,6 +343,15 @@ void CobaltContentBrowserClient::ConfigureNetworkContextParams(
 void CobaltContentBrowserClient::OnWebContentsCreated(
     content::WebContents* web_contents) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
+  if (web_contents->GetPrimaryMainFrame() &&
+      web_contents->GetPrimaryMainFrame()->GetFrameName() ==
+          content::kCobaltSplashMainFrameName) {
+    // Don't observe WebContents if it's splash screen.
+    VLOG(1) << "NativeSplash: Skip observing WebContents for "
+               "kCobaltSplashMainFrameName.";
+    return;
+  }
+  VLOG(1) << "NativeSplash: Observing main frame WebContents.";
   web_contents_observer_.reset(new CobaltWebContentsObserver(web_contents));
 }
 
@@ -405,6 +438,27 @@ void CobaltContentBrowserClient::DispatchFocus() {
       web_contents->GetRenderViewHost()->GetWidget()->Focus();
     }
   }
+}
+
+void CobaltContentBrowserClient::AddPendingWindowReceiver(
+    mojo::PendingReceiver<cobalt::media::mojom::PlatformWindowProvider>
+        receiver) {
+  if (cached_sb_window_) {
+    BindPlatformWindowProviderService(cached_sb_window_, std::move(receiver));
+  } else {
+    pending_window_receivers_.push_back(std::move(receiver));
+  }
+}
+
+void CobaltContentBrowserClient::OnSbWindowCreated(SbWindow window) {
+  // TODO: b/476434249 - Revisit if Cobalt supports multiple tabs/windows. This
+  // assumes only single PlatformWindowStarboard() in Cobalt.
+  CHECK(!cached_sb_window_);
+  cached_sb_window_ = reinterpret_cast<uint64_t>(window);
+  for (auto& receiver : pending_window_receivers_) {
+    BindPlatformWindowProviderService(cached_sb_window_, std::move(receiver));
+  }
+  pending_window_receivers_.clear();
 }
 
 void CobaltContentBrowserClient::FlushCookiesAndLocalStorage(
@@ -524,6 +578,9 @@ void CobaltContentBrowserClient::CreateFeatureListAndFieldTrials() {
             << "], disable_features=["
             << command_line.GetSwitchValueASCII(::switches::kDisableFeatures)
             << "]";
+  LOG(INFO) << "CobaltCommandLine: "
+            << CommandLineSwitchesToString(
+                   *base::CommandLine::ForCurrentProcess());
 
   // Push the initialized features and params down to Starboard.
   features::InitializeStarboardFeatures();

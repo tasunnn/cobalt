@@ -18,6 +18,7 @@
 #import <UIKit/UIKit.h>
 #include <libkern/OSByteOrder.h>
 
+#include "base/apple/foundation_util.h"
 #import "starboard/tvos/shared/defines.h"
 #include "starboard/tvos/shared/media/avutil/utils.h"
 #import "starboard/tvos/shared/media/player_manager.h"
@@ -129,9 +130,11 @@ const size_t kCachedFramesHighWatermark = 40;
 const int kRequiredBuffersInDisplayLayer = 16;
 
 UIWindow* GetPlatformWindow() {
-  SB_CHECK(!UIApplication.sharedApplication.supportsMultipleScenes);
-  UIWindowScene* scene = reinterpret_cast<UIWindowScene*>(
-      UIApplication.sharedApplication.connectedScenes.anyObject);
+  NSSet<UIScene*>* connected_scenes =
+      UIApplication.sharedApplication.connectedScenes;
+  SB_CHECK_EQ(connected_scenes.count, 1U);
+  UIWindowScene* scene =
+      base::apple::ObjCCastStrict<UIWindowScene>(connected_scenes.anyObject);
   return scene.keyWindow;
 }
 
@@ -153,8 +156,7 @@ AVSBVideoRenderer::AVSBVideoRenderer(const VideoStreamInfo& video_stream_info,
     display_layer_.videoGravity = AVLayerVideoGravityResizeAspect;
 
     id<SBDStarboardApplication> application = SBDGetApplication();
-    SBDWindowManager* windowManager = application.windowManager;
-    [windowManager.currentApplicationWindow attachPlayerView:display_view_];
+    [application attachPlayerView:display_view_];
   });
 
   ObserverRegistry::RegisterObserver(&observer_);
@@ -209,7 +211,7 @@ AVSBVideoRenderer::~AVSBVideoRenderer() {
 
   SBDAVSampleBufferDisplayView* display_view = display_view_;
   AVSampleBufferDisplayLayer* display_layer = display_layer_;
-  dispatch_async(dispatch_get_main_queue(), ^{
+  onApplicationMainThread(^{
     [display_layer flush];
     [display_view removeFromSuperview];
 
@@ -306,6 +308,7 @@ bool AVSBVideoRenderer::IsEndOfStreamWritten() const {
   SB_DCHECK(BelongsToCurrentThread());
   return eos_written_;
 }
+
 bool AVSBVideoRenderer::CanAcceptMoreData() const {
   SB_DCHECK(BelongsToCurrentThread());
   // The number returned by GetNumberOfCachedFrames() is not accruate. It's
@@ -321,7 +324,7 @@ void AVSBVideoRenderer::SetBounds(int z_index,
                                   int height) {
   SBDAVSampleBufferDisplayView* display_view = display_view_;
   AVSampleBufferDisplayLayer* display_layer = display_layer_;
-  dispatch_async(dispatch_get_main_queue(), ^{
+  onApplicationMainThread(^{
     float scale = [UIScreen mainScreen].scale;
     display_view.frame =
         CGRectMake(x / scale, y / scale, width / scale, height / scale);
@@ -336,10 +339,14 @@ void AVSBVideoRenderer::SetMediaTimeOffset(int64_t media_time_offset) {
   // Flush |display_layer_| after AVSBSynchronizer set rate and time to zero in
   // AVSBSynchronizer::Seek().
   is_display_layer_flushing_ = true;
-  AVSampleBufferDisplayLayer* display_layer = display_layer_;
-  dispatch_async(dispatch_get_main_queue(), ^{
-    [display_layer flush];
-    is_display_layer_flushing_ = false;
+  base::WeakPtr<AVSBVideoRenderer> weak_this = weak_ptr_factory_.GetWeakPtr();
+  onApplicationMainThread(^{
+    AVSBVideoRenderer* strong_this = weak_this.get();
+    if (!strong_this) {
+      return;
+    }
+    [strong_this->display_layer_ flush];
+    strong_this->is_display_layer_flushing_ = false;
   });
 }
 
@@ -412,7 +419,7 @@ void AVSBVideoRenderer::UpdatePreferredDisplayCriteria() {
     // delegate cannot be performed on the resource loader's queue thread.
     // Otherwise, it will cause deadlock.
     AVDisplayCriteria* criteria = asset.preferredDisplayCriteria;
-    dispatch_async(dispatch_get_main_queue(), ^{
+    onApplicationMainThread(^{
       avDisplayManager.preferredDisplayCriteria = criteria;
     });
   }

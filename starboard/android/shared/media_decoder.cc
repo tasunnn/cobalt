@@ -95,10 +95,12 @@ class MediaCodecDecoder::DecoderThread : public Thread {
   MediaCodecDecoder* decoder_;
 };
 
-MediaCodecDecoder::MediaCodecDecoder(Host* host,
+MediaCodecDecoder::MediaCodecDecoder(JobQueue* job_queue,
+                                     Host* host,
                                      const AudioStreamInfo& audio_stream_info,
                                      SbDrmSystem drm_system)
-    : media_type_(kSbMediaTypeAudio),
+    : JobOwner(job_queue),
+      media_type_(kSbMediaTypeAudio),
       host_(host),
       drm_system_(static_cast<DrmSystem*>(drm_system)),
       tunnel_mode_enabled_(false),
@@ -126,12 +128,11 @@ MediaCodecDecoder::MediaCodecDecoder(Host* host,
 }
 
 MediaCodecDecoder::MediaCodecDecoder(
+    JobQueue* job_queue,
     Host* host,
     SbMediaVideoCodec video_codec,
-    int width_hint,
-    int height_hint,
-    std::optional<int> max_width,
-    std::optional<int> max_height,
+    const Size& frame_size_hint,
+    const std::optional<Size>& max_frame_size,
     int fps,
     jobject j_output_surface,
     SbDrmSystem drm_system,
@@ -144,7 +145,8 @@ MediaCodecDecoder::MediaCodecDecoder(
     int max_video_input_size,
     int64_t flush_delay_usec,
     std::string* error_message)
-    : media_type_(kSbMediaTypeVideo),
+    : JobOwner(job_queue),
+      media_type_(kSbMediaTypeVideo),
       host_(host),
       drm_system_(static_cast<DrmSystem*>(drm_system)),
       frame_rendered_cb_(frame_rendered_cb),
@@ -159,7 +161,7 @@ MediaCodecDecoder::MediaCodecDecoder(
       drm_system_ && drm_system_->require_secured_decoder();
   SB_DCHECK(!drm_system_ || j_media_crypto);
   auto media_codec_bridge = MediaCodecBridge::CreateVideoMediaCodecBridge(
-      video_codec, width_hint, height_hint, fps, max_width, max_height, this,
+      video_codec, frame_size_hint, fps, max_frame_size, /*handler=*/this,
       j_output_surface, j_media_crypto, color_metadata, require_secured_decoder,
       require_software_codec, tunnel_mode_audio_session_id,
       force_big_endian_hdr_metadata, max_video_input_size);

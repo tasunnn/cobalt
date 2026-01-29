@@ -45,8 +45,9 @@ public class CobaltConnectivityDetector {
 
   private final CobaltActivity activity;
   private PlatformError platformError;
-  private boolean mAppHasSuccessfullyLoaded = false;
-  private boolean mHasVerifiedConnectivity = false;
+  private volatile boolean mAppHasSuccessfullyLoaded = false;
+  private volatile boolean mHasVerifiedConnectivity = false;
+  private volatile boolean mHasEncounteredConnectivityError = false;
 
   private final ExecutorService managementExecutor = Executors.newSingleThreadExecutor();
   private Future<?> managementFuture;
@@ -88,7 +89,7 @@ public class CobaltConnectivityDetector {
                     () -> {
                       for (String urlString : PROBE_URLS) {
                         if (Thread.currentThread().isInterrupted()) {
-                          return false;
+                          throw new InterruptedException("Network probe interrupted.");
                         }
                         if (performSingleProbe(urlString)) {
                           return true;
@@ -106,16 +107,19 @@ public class CobaltConnectivityDetector {
                 } else {
                   handleFailure();
                 }
+              // Don't raise the error dialog if the thread is intentionally interrupted.
+              // Otherwise handleFailure() for timeout exceptions and all other exceptions.
               } catch (TimeoutException e) {
                 handleFailure();
               } catch (Exception e) {
-                if (e instanceof InterruptedException) {
+                if (e instanceof InterruptedException || e instanceof java.util.concurrent.CancellationException) {
                   Thread.currentThread().interrupt(); // Preserve interrupt status.
+                } else {
+                  Log.w(TAG, "Connectivity check failed with exception: " + e.getClass().getName(), e);
+                  handleFailure();
                 }
-                Log.w(TAG, "Connectivity check failed with exception: " + e.getClass().getName(), e);
-                handleFailure();
               } finally {
-                // This is crucial. It ensures the probe thread is discarded.
+                // Ensuring the probe thread is discarded.
                 probeExecutor.shutdownNow();
               }
             });
@@ -132,8 +136,9 @@ public class CobaltConnectivityDetector {
             platformError.dismiss();
             platformError = null;
           }
-          // The app should only reload if we haven't previously successfully loaded past startup.
-          if (!mAppHasSuccessfullyLoaded) {
+          // The app should only reload if we haven't previously successfully loaded past startup
+          // and we are recovering from a connectivity error.
+          if (!mAppHasSuccessfullyLoaded && mHasEncounteredConnectivityError) {
             WebContents webContents = activity.getActiveWebContents();
             if (webContents != null) {
               webContents.getNavigationController().reload(true);
@@ -145,6 +150,7 @@ public class CobaltConnectivityDetector {
   // Raise a platform error for any connectivity check failure
   private void handleFailure() {
     mHasVerifiedConnectivity = false;
+    mHasEncounteredConnectivityError = true;
     activity.runOnUiThread(
         () -> {
           if (platformError == null || !platformError.isShowing()) {

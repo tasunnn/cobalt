@@ -75,6 +75,7 @@ import org.chromium.ui.base.IntentRequestTracker;
 public abstract class CobaltActivity extends Activity {
   private static final String URL_ARG = "--url=";
   private static final String META_DATA_APP_URL = "cobalt.APP_URL";
+  private static final String META_DATA_ENABLE_SPLASH_SCREEN = "cobalt.ENABLE_SPLASH_SCREEN";
   private static final String META_DATA_ENABLE_FEATURES = "cobalt.ENABLE_FEATURES";
 
   // This key differs in naming format for legacy reasons
@@ -105,6 +106,11 @@ public abstract class CobaltActivity extends Activity {
   private Boolean mIsKeepScreenOnEnabled = false;
   private CobaltConnectivityDetector mCobaltConnectivityDetector;
   private WebContentsObserver mWebContentsObserver;
+
+  private boolean mIsCobaltUsingAndroidOverlay;
+  private static final String COBALT_USING_ANDROID_OVERLAY = "CobaltUsingAndroidOverlay";
+
+  private boolean mEnableSplashScreen;
 
   private Bundle getActivityMetaData() {
     ComponentName componentName = getIntent().getComponent();
@@ -164,6 +170,9 @@ public abstract class CobaltActivity extends Activity {
           new CommandLineOverrideHelper.CommandLineOverrideHelperParams(
               VersionInfo.isOfficialBuild(), commandLineArgs));
     }
+    mIsCobaltUsingAndroidOverlay = CommandLine.getInstance().hasSwitch(COBALT_USING_ANDROID_OVERLAY);
+    Bundle metaData = getActivityMetaData();
+    mEnableSplashScreen = metaData == null || metaData.getBoolean(META_DATA_ENABLE_SPLASH_SCREEN, true);
 
     DeviceUtils.updateDeviceSpecificUserAgentSwitch(this);
 
@@ -216,9 +225,6 @@ public abstract class CobaltActivity extends Activity {
               .findAny()
               .map(arg -> arg.substring(arg.indexOf(URL_ARG) + URL_ARG.length()))
               .orElse(null);
-    }
-    if (!TextUtils.isEmpty(mStartupUrl)) {
-      mShellManager.setStartupUrl(Shell.sanitizeUrl(mStartupUrl));
     }
 
     // TODO(b/377025559): Bring back WebTests launch capability
@@ -290,6 +296,11 @@ public abstract class CobaltActivity extends Activity {
                   }
                 }
               };
+
+            if (mEnableSplashScreen) {
+              // Load splash screen.
+              mShellManager.getActiveShell().loadSplashScreenWebContents();
+            }
           }
         });
   }
@@ -408,9 +419,13 @@ public abstract class CobaltActivity extends Activity {
     mCobaltConnectivityDetector.registerObserver();
     NetworkChangeNotifier.setAutoDetectConnectivityState(true);
 
-    mVideoSurfaceView = new VideoSurfaceView(this);
-    addContentView(
-        mVideoSurfaceView, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
+    if (!mIsCobaltUsingAndroidOverlay) {
+      mVideoSurfaceView = new VideoSurfaceView(this);
+      addContentView(
+          mVideoSurfaceView, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
+    } else {
+      Log.i(TAG, "Do not create VideoSurfaceView.");
+    }
   }
 
   /**
@@ -470,7 +485,9 @@ public abstract class CobaltActivity extends Activity {
       getStarboardBridge().getAudioOutputManager().dumpAllOutputDevices();
       MediaCodecCapabilitiesLogger.dumpAllDecoders();
     }
-    if (mForceCreateNewVideoSurfaceView) {
+    if (mIsCobaltUsingAndroidOverlay) {
+      Log.i(TAG, "Use AndroidOverlay for Video SurfaceView.");
+    } else if (mForceCreateNewVideoSurfaceView) {
       Log.w(TAG, "Force to create a new video surface.");
       createNewSurfaceView();
     }
@@ -482,6 +499,7 @@ public abstract class CobaltActivity extends Activity {
     getStarboardBridge().onActivityStart(this);
     super.onStart();
 
+    updateShellActivityVisible(true);
     WebContents webContents = getActiveWebContents();
     if (webContents != null) {
       // document.onresume event
@@ -503,6 +521,7 @@ public abstract class CobaltActivity extends Activity {
     getStarboardBridge().onActivityStop(this);
     super.onStop();
 
+    updateShellActivityVisible(false);
     WebContents webContents = getActiveWebContents();
     if (webContents != null) {
       // visibility:hidden event
@@ -668,6 +687,9 @@ public abstract class CobaltActivity extends Activity {
   }
 
   public void resetVideoSurface() {
+    if (mIsCobaltUsingAndroidOverlay) {
+      return;
+    }
     runOnUiThread(
         new Runnable() {
           @Override
@@ -678,6 +700,9 @@ public abstract class CobaltActivity extends Activity {
   }
 
   public void setVideoSurfaceBounds(final int x, final int y, final int width, final int height) {
+    if (mIsCobaltUsingAndroidOverlay) {
+      return;
+    }
     if (width == 0 || height == 0) {
       // The SurfaceView should be covered by our UI layer in this case.
       return;
@@ -710,6 +735,9 @@ public abstract class CobaltActivity extends Activity {
   }
 
   private void createNewSurfaceView() {
+    if (mIsCobaltUsingAndroidOverlay) {
+      return;
+    }
     ViewParent parent = mVideoSurfaceView.getParent();
     if (parent instanceof FrameLayout) {
       FrameLayout frameLayout = (FrameLayout) parent;
@@ -762,6 +790,12 @@ public abstract class CobaltActivity extends Activity {
             }
           });
       mIsKeepScreenOnEnabled = keepOn;
+    }
+  }
+
+  private void updateShellActivityVisible(boolean isVisible) {
+    if (mShellManager != null) {
+      mShellManager.onActivityVisible(isVisible);
     }
   }
 }
