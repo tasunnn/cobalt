@@ -196,7 +196,7 @@ class H5vccSchemeURLLoader : public network::mojom::URLLoader {
     if (base::EndsWith(key, ".html", base::CompareCase::SENSITIVE)) {
       mime_type = "text/html";
     } else if (base::EndsWith(key, ".png", base::CompareCase::SENSITIVE)) {
-      mime_type = "image/png"; 
+      mime_type = "image/png";
       if (browser_context_) {
         ReadSplashCache(key, mime_type);
         return;
